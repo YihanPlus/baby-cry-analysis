@@ -111,6 +111,16 @@ def main(root, out_csv, compute_duration=False):
             print("  ", u)
     print("\nDone.")
 
+def parse_labels(filepaths):
+    """
+    Given a list of file paths, return a list of canonical labels inferred from filenames.
+    """
+    labels = []
+    for p in filepaths:
+        _, label = infer_label_from_filename(p)
+        labels.append(label)
+    return labels
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--root", default="data/raw", help="root folder containing audio files")
