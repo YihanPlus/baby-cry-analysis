@@ -2,6 +2,8 @@
 Feature extraction utilities:
  - extract_mfcc(): extract MFCCs from a single audio file
  - extract_split_mfcc(): batch extract MFCCs for a dataset split
+ - pad_or_trim_mfcc(): pad/truncate MFCC to fixed time frames
+ - prepare_cnn_input(): convert MFCC list to 4D CNN-ready tensor
 """
 
 import os
@@ -40,4 +42,20 @@ def extract_split_mfcc(split_name, folder_path, out_dir="data/mfcc", n_mfcc=40, 
     X = np.array(X, dtype=object)
     np.save(f"{out_dir}/{split_name}_mfcc.npy", X)
     print(f"✅ Saved {split_name} MFCCs to {out_dir}/{split_name}_mfcc.npy")
+    return X
+
+def pad_or_trim_mfcc(mfcc, max_frames=173):
+    """Pad or truncate MFCC matrix to fixed number of frames for CNN."""
+    if mfcc.shape[1] < max_frames:
+        pad_width = max_frames - mfcc.shape[1]
+        mfcc = np.pad(mfcc, ((0, 0), (0, pad_width)), mode="constant")
+    else:
+        mfcc = mfcc[:, :max_frames]
+    return mfcc
+
+
+def prepare_cnn_input(mfcc_list, max_frames=173):
+    """Convert a list of MFCCs into a 4D CNN-ready tensor."""
+    X = np.stack([pad_or_trim_mfcc(m, max_frames=max_frames) for m in mfcc_list]).astype(np.float32)
+    X = X[..., np.newaxis]  # add channel dimension
     return X
