@@ -1,113 +1,126 @@
-# src/models/cnn.py
-
-import numpy as np
-import matplotlib.pyplot as plt
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv1D, MaxPooling1D, GlobalAveragePooling1D, Dense, Dropout, BatchNormalization
-from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping
-from sklearn.preprocessing import StandardScaler
 import os
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, f1_score
+import matplotlib.pyplot as plt
 
-print("Current working directory:", os.getcwd())
-print("Files in mfcc_cnn folder:", os.listdir("data/mfcc_cnn"))
+class CryDataset(Dataset):
+    def __init__(self, npy_path, binned_label_path, scaler=None):
+        arr = np.load(npy_path, allow_pickle=True)
+        self.X = np.array([sample[0] for sample in arr])
+        self.y = np.load(binned_label_path)
+        if scaler is not None:
+            shape = self.X.shape
+            self.X = scaler.transform(self.X.reshape(-1, shape[-1])).reshape(shape)
+    def __len__(self): return len(self.X)
+    def __getitem__(self, i):
+        # Add channel dimension: (1, time, freq)
+        return torch.tensor(self.X[i][np.newaxis], dtype=torch.float32), int(self.y[i])
 
-train = np.load('data/mfcc_cnn/train_mfcc_cnn.npy', allow_pickle=True)
-test = np.load('data/mfcc_cnn/test_mfcc_cnn.npy', allow_pickle=True)
+# Normalize and bin labels
+train_data = np.load("data/mfcc_cnn/train_mfcc_cnn.npy", allow_pickle=True)
+test_data = np.load("data/mfcc_cnn/test_mfcc_cnn.npy", allow_pickle=True)
+X_train = np.array([sample[0] for sample in train_data])
+y_train_raw = np.array([sample[1][0] if isinstance(sample[1], (list, np.ndarray)) else sample[1] for sample in train_data])
+X_test = np.array([sample[0] for sample in test_data])
+y_test_raw = np.array([sample[1][0] if isinstance(sample[1], (list, np.ndarray)) else sample[1] for sample in test_data])
 
-X_train = np.array([sample[0] for sample in train])
-y_train_raw = np.array([sample[1][0] if isinstance(sample[1], (list, np.ndarray)) else sample[1] for sample in train])
-X_test = np.array([sample[0] for sample in test])
-y_test_raw = np.array([sample[1][0] if isinstance(sample[1], (list, np.ndarray)) else sample[1] for sample in test])
-
-# Feature normalization
-num_samples, timesteps, features = X_train.shape
+num_samples, t_dim, f_dim = X_train.shape
 scaler = StandardScaler()
-X_train_flat = X_train.reshape(-1, features)
-X_train_scaled = scaler.fit_transform(X_train_flat).reshape(num_samples, timesteps, features)
-X_test_flat = X_test.reshape(-1, features)
-X_test_scaled = scaler.transform(X_test_flat).reshape(X_test.shape)
-X_train, X_test = X_train_scaled, X_test_scaled
+X_train_flat = X_train.reshape(-1, f_dim)
+scaler.fit(X_train_flat)
 
-# Quartile-based bins for balanced classes
-quantiles = np.percentile(y_train_raw, [0, 3, 30, 100])
+quantiles = np.percentile(y_train_raw, [0, 2, 8, 100])
 bins = [-np.inf, quantiles[1], quantiles[2], np.inf]
-y_train = np.digitize(y_train_raw, bins=bins) - 1
-y_test = np.digitize(y_test_raw, bins=bins) - 1
+y_train_binned = np.digitize(y_train_raw, bins=bins) - 1
+y_test_binned = np.digitize(y_test_raw, bins=bins) - 1
+num_classes = len(np.unique(y_train_binned))
+np.save("data/mfcc_cnn/train_labels_binned.npy", y_train_binned)
+np.save("data/mfcc_cnn/test_labels_binned.npy", y_test_binned)
 
-y_train = np.array(y_train).flatten().astype(int)
-y_test = np.array(y_test).flatten().astype(int)
+batch_size = 32
+train_set = CryDataset("data/mfcc_cnn/train_mfcc_cnn.npy", "data/mfcc_cnn/train_labels_binned.npy", scaler)
+test_set = CryDataset("data/mfcc_cnn/test_mfcc_cnn.npy", "data/mfcc_cnn/test_labels_binned.npy", scaler)
+train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
+test_loader = DataLoader(test_set, batch_size=batch_size)
 
-print("Chosen bins:", bins)
-print("Counts per bin:", np.bincount(y_train))
-num_classes = len(np.unique(y_train))
-print("Detected num_classes (bins):", num_classes)
+# Determine the pooling shape
+pool_shape = (2, 1) if f_dim == 1 else (2, 2)
 
-y_train_cat = to_categorical(y_train, num_classes=num_classes)
-y_test_cat = to_categorical(y_test, num_classes=num_classes)
-print("y_train_cat shape:", y_train_cat.shape)
+class CNN2D(nn.Module):
+    def __init__(self, num_classes, pool_shape):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 32, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(32)
+        self.pool1 = nn.MaxPool2d(pool_shape)
+        self.drop1 = nn.Dropout(0.3)
 
-if len(X_train.shape) == 2:
-    X_train = X_train[..., np.newaxis]
-    X_test = X_test[..., np.newaxis]
-print("X_train shape after expansion:", X_train.shape)
+        self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
+        self.bn2 = nn.BatchNorm2d(64)
+        self.pool2 = nn.MaxPool2d(pool_shape)
+        self.drop2 = nn.Dropout(0.3)
 
-model = Sequential([
-    Conv1D(64, 5, activation='relu', input_shape=X_train.shape[1:]),
-    BatchNormalization(),
-    MaxPooling1D(2),
-    Dropout(0.3),
-    Conv1D(128, 5, activation='relu'),
-    BatchNormalization(),
-    MaxPooling1D(2),
-    Dropout(0.3),
-    GlobalAveragePooling1D(),
-    Dense(128, activation='relu'),
-    Dropout(0.3),
-    Dense(num_classes, activation='softmax')
-])
+        self.conv3 = nn.Conv2d(64, 128, 3, padding=1)
+        self.bn3 = nn.BatchNorm2d(128)
+        self.globpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.drop3 = nn.Dropout(0.4)
+        self.fc1 = nn.Linear(128, num_classes)
 
-model.compile(optimizer=Adam(learning_rate=0.0005), loss='categorical_crossentropy', metrics=['accuracy'])
-model.summary()
-print("Model defined")
+    def forward(self, x):
+        x = self.drop1(self.pool1(F.relu(self.bn1(self.conv1(x)))))
+        x = self.drop2(self.pool2(F.relu(self.bn2(self.conv2(x)))))
+        x = self.drop3(self.globpool(F.relu(self.bn3(self.conv3(x)))))
+        x = x.view(x.size(0), -1)
+        return self.fc1(x)
 
-early_stop = EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True)
-history = model.fit(
-    X_train, y_train_cat,
-    epochs=100,
-    batch_size=32,
-    validation_data=(X_test, y_test_cat),
-    callbacks=[early_stop]
-)
-loss, acc = model.evaluate(X_test, y_test_cat)
-print(f"Test accuracy: {acc*100:.2f}%")
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = CNN2D(num_classes, pool_shape=pool_shape).to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+criterion = nn.CrossEntropyLoss()
+num_epochs = 50
+train_losses, val_accuracies = [], []
 
-if not os.path.exists('models'):
-    os.makedirs('models')
-model.save('models/baby_cry_cnn_mfcc.h5')
-print('Model saved at models/baby_cry_cnn_mfcc.h5')
+for epoch in range(num_epochs):
+    model.train()
+    epoch_loss = 0.0
+    for batch_X, batch_y in train_loader:
+        batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+        optimizer.zero_grad()
+        logit = model(batch_X)
+        loss = criterion(logit, batch_y)
+        loss.backward()
+        optimizer.step()
+        epoch_loss += loss.item() * batch_X.size(0)
+    train_losses.append(epoch_loss / len(train_loader.dataset))
 
-# Visualization: Save test/train accuracy plot
+    # Validation
+    model.eval()
+    all_preds = []
+    all_true = []
+    with torch.no_grad():
+        for batch_X, batch_y in test_loader:
+            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+            preds = torch.argmax(model(batch_X), dim=1)
+            all_preds.extend(preds.cpu().numpy())
+            all_true.extend(batch_y.cpu().numpy())
+    acc = accuracy_score(all_true, all_preds)
+    val_accuracies.append(acc)
+    print(f"Epoch {epoch+1}: Loss={train_losses[-1]:.4f}, Val Acc={acc:.4f}")
+
+# Final metrics, save
+f1 = f1_score(all_true, all_preds, average='weighted')
+print(f"Final Test Accuracy: {val_accuracies[-1]*100:.3f}%, F1 Score: {f1:.3f}")
+if not os.path.exists('models'): os.makedirs('models')
+torch.save(model.state_dict(), 'models/baby_cry_cnn_mel.pt')
+print("Model saved as models/baby_cry_cnn_mel.pt")
+
 plt.figure()
-plt.plot(history.history['accuracy'], label="Train Accuracy")
-plt.plot(history.history['val_accuracy'], label="Test Accuracy")
-plt.title("Accuracy over Epochs")
-plt.xlabel("Epoch")
-plt.ylabel("Accuracy")
-plt.legend()
-plt.tight_layout()
-plt.savefig('models/test_accuracy_plot.png')
-print("Saved accuracy plot as models/test_accuracy_plot.png")
-
-# Visualization: Save test/train loss plot
-plt.figure()
-plt.plot(history.history['loss'], label="Train Loss")
-plt.plot(history.history['val_loss'], label="Test Loss")
-plt.title("Loss over Epochs")
-plt.xlabel("Epoch")
-plt.ylabel("Loss")
-plt.legend()
-plt.tight_layout()
-plt.savefig('models/test_loss_plot.png')
-print("Saved loss plot as models/test_loss_plot.png")
+plt.plot(train_losses, label='Train Loss')
+plt.plot(val_accuracies, label='Validation Accuracy')
+plt.legend(); plt.xlabel('Epoch'); plt.title('Train History')
+plt.tight_layout(); plt.savefig('models/train_val_plot.png')
+print("Saved train_val_plot.png")
