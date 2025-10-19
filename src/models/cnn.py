@@ -124,3 +124,5 @@ plt.plot(val_accuracies, label='Validation Accuracy')
 plt.legend(); plt.xlabel('Epoch'); plt.title('Train History')
 plt.tight_layout(); plt.savefig('models/train_val_plot.png')
 print("Saved train_val_plot.png")
+
+# Example inference
